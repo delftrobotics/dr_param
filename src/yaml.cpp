@@ -1,12 +1,11 @@
 #include "yaml.hpp"
 #include "yaml_macros.hpp"
-
 #include <fmt/format.h>
-
 #include <algorithm>
 #include <cerrno>
 #include <fstream>
 #include <sstream>
+
 
 namespace dr {
 
@@ -104,29 +103,127 @@ estd::result<YAML::Node, estd::error> readYamlFile(std::string const & path) {
 	buffer << file.rdbuf();
 	return YAML::Load(buffer.str());
 }
+// Merge Yaml Nodes of type Ordered Dictionary, i.e., sequence on Maps.
+YamlResult<void> mergeYamlOrderedDict(YAML::Node & map_a, YAML::Node map_b);
 
-YamlResult<void> mergeYamlNodes(YAML::Node & map_a, YAML::Node map_b) {
-	// Check if the arguments are maps.
-	if (!map_a.IsMap() && !map_a.IsNull()) {
-		return YamlError{"tried to merge into a YAML node that is not a map"};
-	}
-	if (!map_b.IsMap() && !map_b.IsNull()) {
-		return YamlError{"tried to merge from a YAML node that is not a map"};
-	}
+inline YamlResult<void> mergeYamlOrderedDict(YAML::Node && map_a, YAML::Node map_b) {
+ 	return mergeYamlOrderedDict(map_a, map_b);
+ }
 
-	for (YAML::const_iterator iterator = map_b.begin(); iterator != map_b.end(); iterator++) {
-		std::string key = iterator->first.as<std::string>();
-		YAML::Node value = iterator->second;
-		if (value.IsMap() && map_a[key]) {
-			auto merged = mergeYamlNodes(map_a[key], value);
-			if (!merged) {
-				merged.error().appendTrace({key, "", YAML::NodeType::Map});
-				return merged;
+// Merge Yaml Nodes of type Map , i.e., a key-value pair.
+YamlResult<void> mergeYamlMaps(YAML::Node & map_a, YAML::Node map_b);
+
+inline YamlResult<void> mergeYamlMaps(YAML::Node && map_a, YAML::Node map_b) {
+ 	return mergeYamlMaps(map_a, map_b);
+  }
+
+
+// Merge Yaml Nodes (Type: Map).
+YamlResult<void> mergeYamlMaps(YAML::Node & map_a, YAML::Node map_b) {
+	if (map_b.IsMap()){
+		for (YAML::const_iterator iterator = map_b.begin(); iterator != map_b.end(); iterator++) {
+			std::string key = iterator->first.as<std::string>();
+			YAML::Node value = iterator->second;
+			if (map_a[key] && map_a[key].IsMap()) {
+				auto merged = mergeYamlMaps(map_a[key], value);
+				if (!merged) {
+					merged.error().appendTrace({key, "", YAML::NodeType::Map});
+					return merged;
+				}
 			}
-			continue;
+			else if (value.Tag() == "!ordered_dict"  && map_a[key].Tag() == "!ordered_dict" && map_a[key]) {
+				auto merged = mergeYamlOrderedDict(map_a[key], value);
+				if (!merged) {
+					merged.error().appendTrace({key, "", YAML::NodeType::Map});
+					return merged;
+				}
+			}
+			else {
+			map_a[key] = value;
+			}
 		}
-		map_a[key] = value;
 	}
+	return estd::in_place_valid;
+}
+
+// Uitility function to check whether a value is present in a vector.
+bool Contains(const std::vector<int> &list, int x){
+	return std::find(list.begin(), list.end(), x) != list.end();
+}
+
+// Check whether item is a single item map.
+bool singleMap(YAML::Node yaml_node){
+	if (!yaml_node.IsMap() && yaml_node.size() > 1){
+		return false;
+	}
+	return true;
+}
+// Utility function to check whether key in map_b is present in map_a.
+std::optional<std::size_t> orderedDictFind(YAML::Node map_a, std::string const & key){
+	for (std::size_t j = 0; j < map_a.size(); j++){
+			if (map_a[j][key]){
+					return j;
+				}
+			
+	}
+	
+	return std::nullopt;
+}
+
+// Merge ordered dictionaries.
+YamlResult<void> mergeYamlOrderedDict(YAML::Node & map_a, YAML::Node map_b){
+	// Check if map_b is a list which is the first criteria for an ordered dictionary.
+	if (!map_b.IsSequence()){
+		return YamlError("Child node is not an ordered dictionary.");
+	}
+
+	// Vector containing all the indexes of b which are present in a.
+	std::vector<int> checked;
+	std::optional<std::size_t> index;
+	bool single_map = true;
+	// Boolean to determine whether the element in b is present in a or not.
+	bool found = false;
+	for (std::size_t i = 0; i < map_b.size(); i++) {
+		found = false;
+		// Check whether the element in b is a single key-value pair.
+		if (!singleMap(map_b[i])){
+			return YamlError("Ordered dictionary should only contain single item map");
+		}
+		std::string key = map_b[i].begin()->first.as<std::string>();
+		index = orderedDictFind(map_a, key);
+		if (index && !Contains(checked, index.value())) {
+			if (!singleMap(map_a[index.value()])) {
+				return YamlError("Ordered dictionary should only contain single item map");
+			}
+			mergeYamlMaps(map_a[index.value()], map_b[i]);
+			checked.push_back(index.value());
+			found = true;
+		}
+		
+		// If element in b is not present in a, push the new element to a.
+		if (!found){
+				map_a.push_back(map_b[i]);
+		}
+	}
+	
+	return estd::in_place_valid;
+}
+
+// Merge Yaml Nodes.
+YamlResult<void> mergeYamlNodes(YAML::Node & map_a, YAML::Node map_b) {
+	if (map_a.IsMap()){
+		mergeYamlMaps(map_a, map_b);
+	}
+	else if (map_a.IsNull() && !map_b.IsNull()){
+		map_a = map_b;
+	}
+	else if (map_b.IsNull() && !map_a.IsNull()) {
+		return estd::in_place_valid;
+	} 
+	else if (map_a.Tag() == "!ordered_dict") {
+		mergeYamlOrderedDict(map_a, map_b);
+	}
+	
 	return estd::in_place_valid;
 }
 
